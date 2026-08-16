@@ -1,0 +1,9 @@
+*.exe
+*.EXE
+bin/
+.env
+.armin/
+*.log
+
+# BEGIN AUTO-MANAGED LARGE FILES (>5MB)
+# END AUTO-MANAGED LARGE FILES
