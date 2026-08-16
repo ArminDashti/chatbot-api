@@ -280,6 +280,62 @@ func TouchConversationTitle(ctx context.Context, db *sql.DB, id, title string) e
 	return err
 }
 
+type ChatSettings struct {
+	BaseURL string
+	APIKey  string
+	Model   string
+}
+
+func GetChatSettings(ctx context.Context, db *sql.DB) (*ChatSettings, error) {
+	var s ChatSettings
+	err := db.QueryRowContext(ctx, `
+		SELECT chat_base_url, chat_api_key, chat_model
+		FROM app_settings WHERE id = 1
+	`).Scan(&s.BaseURL, &s.APIKey, &s.Model)
+	if err == sql.ErrNoRows {
+		return &ChatSettings{Model: "auto"}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
+func PutChatSettings(ctx context.Context, db *sql.DB, baseURL, model, apiKey string, updateKey bool) error {
+	if updateKey {
+		_, err := db.ExecContext(ctx, `
+			INSERT INTO app_settings (id, chat_base_url, chat_model, chat_api_key, updated_at)
+			VALUES (1, $1, $2, $3, NOW())
+			ON CONFLICT (id) DO UPDATE SET
+				chat_base_url = EXCLUDED.chat_base_url,
+				chat_model = EXCLUDED.chat_model,
+				chat_api_key = EXCLUDED.chat_api_key,
+				updated_at = NOW()
+		`, baseURL, model, apiKey)
+		return err
+	}
+	_, err := db.ExecContext(ctx, `
+		INSERT INTO app_settings (id, chat_base_url, chat_model, updated_at)
+		VALUES (1, $1, $2, NOW())
+		ON CONFLICT (id) DO UPDATE SET
+			chat_base_url = EXCLUDED.chat_base_url,
+			chat_model = EXCLUDED.chat_model,
+			updated_at = NOW()
+	`, baseURL, model)
+	return err
+}
+
+func APIKeyHint(key string) string {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return ""
+	}
+	if len(key) <= 4 {
+		return "••••"
+	}
+	return "••••" + key[len(key)-4:]
+}
+
 func GetGlobalRule(ctx context.Context, db *sql.DB) (string, error) {
 	var body string
 	err := db.QueryRowContext(ctx, `SELECT body FROM global_rules WHERE id = 1`).Scan(&body)
@@ -484,7 +540,7 @@ func Summary(ctx context.Context, db *sql.DB) (*SummaryStats, error) {
 	return &s, nil
 }
 
-func ChatStats(ctx context.Context, db *sql.DB) (*ChatStats, error) {
+func GetChatStats(ctx context.Context, db *sql.DB) (*ChatStats, error) {
 	out := &ChatStats{ByUser: []UserChatStat{}, ByDay: []DayChatStat{}}
 	rows, err := db.QueryContext(ctx, `
 		SELECT u.id, u.username,

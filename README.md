@@ -7,7 +7,7 @@ Gin + PostgreSQL API for a company chatbot. Chat completions go through an OpenA
 ```powershell
 docker compose up -d
 copy .env.example .env
-# Set CHAT_API_KEY to a cursor-api gateway key (ck_...)
+# Optional fallback: CHAT_API_KEY. Prefer Admin → Settings in the WebUI.
 go mod tidy
 go run ./cmd/server
 ```
@@ -16,7 +16,7 @@ go run ./cmd/server
 - Postgres: `localhost:5442` (user/pass/db `chatbot`)
 - Default login: `armin` / `dopadopa123` (admin)
 
-Chat replies need a running `cursor-api` and `CHAT_API_KEY` in `.env`. Without a key, the API still stores messages and returns a stub assistant reply.
+Chat replies use the API key from **Admin → Settings**. `.env` `CHAT_API_KEY` is only a fallback if Settings is empty. Without a key, the API still stores messages and returns a stub assistant reply.
 
 ## Health
 

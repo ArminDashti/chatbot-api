@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"io"
@@ -80,6 +81,8 @@ func (s *Server) Router() *gin.Engine {
 				admin.PUT("/groups/:id/rules", s.putGroupRule)
 				admin.PUT("/groups/:id/members", s.putGroupMembers)
 				admin.GET("/users", s.listUsers)
+				admin.GET("/settings", s.getSettings)
+				admin.PUT("/settings", s.putSettings)
 			}
 		}
 	}
@@ -308,6 +311,7 @@ func (s *Server) postMessage(c *gin.Context) {
 
 	_ = writeSSE(gin.H{"type": "user", "message": userMsg})
 
+	s.applyChatSettings(c.Request.Context())
 	full, err := s.llm.CompleteStream(c.Request.Context(), system, userMsg.Body, history, func(delta string) error {
 		return writeSSE(gin.H{"type": "delta", "text": delta})
 	})
@@ -334,7 +338,7 @@ func (s *Server) adminSummary(c *gin.Context) {
 }
 
 func (s *Server) adminChatStats(c *gin.Context) {
-	stats, err := store.ChatStats(c.Request.Context(), s.db)
+	stats, err := store.GetChatStats(c.Request.Context(), s.db)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, "could not load stats")
 		return
@@ -451,6 +455,89 @@ func (s *Server) putGroupMembers(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (s *Server) applyChatSettings(ctx context.Context) {
+	if s.llm == nil {
+		return
+	}
+	base := s.cfg.ChatBaseURL
+	key := s.cfg.ChatAPIKey
+	model := s.cfg.ChatModel
+	saved, err := store.GetChatSettings(ctx, s.db)
+	if err == nil && saved != nil {
+		if strings.TrimSpace(saved.BaseURL) != "" {
+			base = strings.TrimRight(strings.TrimSpace(saved.BaseURL), "/")
+		}
+		if strings.TrimSpace(saved.APIKey) != "" {
+			key = strings.TrimSpace(saved.APIKey)
+		}
+		if strings.TrimSpace(saved.Model) != "" {
+			model = strings.TrimSpace(saved.Model)
+		}
+	}
+	s.llm.BaseURL = base
+	s.llm.APIKey = key
+	s.llm.Model = model
+}
+
+func (s *Server) getSettings(c *gin.Context) {
+	s.applyChatSettings(c.Request.Context())
+	saved, err := store.GetChatSettings(c.Request.Context(), s.db)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "could not load settings")
+		return
+	}
+	base := s.cfg.ChatBaseURL
+	model := s.cfg.ChatModel
+	key := s.cfg.ChatAPIKey
+	if strings.TrimSpace(saved.BaseURL) != "" {
+		base = strings.TrimRight(strings.TrimSpace(saved.BaseURL), "/")
+	}
+	if strings.TrimSpace(saved.Model) != "" {
+		model = saved.Model
+	}
+	if strings.TrimSpace(saved.APIKey) != "" {
+		key = saved.APIKey
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"chat_base_url":     base,
+		"chat_model":        model,
+		"chat_api_key_set":  strings.TrimSpace(key) != "",
+		"chat_api_key_hint": store.APIKeyHint(key),
+	})
+}
+
+type putSettingsRequest struct {
+	ChatBaseURL     string  `json:"chat_base_url"`
+	ChatModel       string  `json:"chat_model"`
+	ChatAPIKey      *string `json:"chat_api_key"`
+	ClearChatAPIKey bool    `json:"clear_chat_api_key"`
+}
+
+func (s *Server) putSettings(c *gin.Context) {
+	var req putSettingsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "invalid request")
+		return
+	}
+	base := strings.TrimSpace(req.ChatBaseURL)
+	model := strings.TrimSpace(req.ChatModel)
+	if model == "" {
+		model = "auto"
+	}
+	updateKey := req.ClearChatAPIKey || req.ChatAPIKey != nil
+	key := ""
+	if req.ClearChatAPIKey {
+		key = ""
+	} else if req.ChatAPIKey != nil {
+		key = strings.TrimSpace(*req.ChatAPIKey)
+	}
+	if err := store.PutChatSettings(c.Request.Context(), s.db, base, model, key, updateKey); err != nil {
+		writeError(c, http.StatusInternalServerError, "could not save settings")
+		return
+	}
+	s.getSettings(c)
 }
 
 func (s *Server) listUsers(c *gin.Context) {
