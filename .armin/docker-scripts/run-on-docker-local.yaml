@@ -1,0 +1,11 @@
+# Local deploy settings — YAML only (no CLI flags).
+
+stack_name: chatbot-api
+image_tag: chatbot-api:latest
+compose_file: ../../docker-compose.local.yml
+dockerfile: ../../dockerfile
+docker_network: chatbot-net
+internal_port: "8134"
+publish_port: "8134"
+delete_volume: "no"
+delete_image: "yes"

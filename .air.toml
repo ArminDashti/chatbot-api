@@ -1,0 +1,17 @@
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  cmd = "go build -o ./tmp/server ./cmd/server"
+  bin = "./tmp/server"
+  include_ext = ["go", "sql"]
+  exclude_dir = ["tmp", "vendor", ".git", ".armin"]
+  delay = 500
+  stop_on_error = true
+  send_interrupt = true
+  kill_delay = "2s"
+  poll = true
+  poll_interval = 500
+
+[misc]
+  clean_on_exit = true

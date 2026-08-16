@@ -54,7 +54,7 @@ func (c *Client) Available() bool {
 
 func (c *Client) CompleteStream(ctx context.Context, system, userPrompt string, history []Message, onDelta func(string) error) (string, error) {
 	if !c.Available() {
-		text := "Chat gateway is not configured. Set the API key in Settings. Your message was saved."
+		text := "Chat gateway is not configured. Set the API key in Admin → Settings. Your message was saved."
 		if err := onDelta(text); err != nil {
 			return "", err
 		}

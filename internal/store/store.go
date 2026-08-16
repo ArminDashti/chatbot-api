@@ -20,11 +20,15 @@ const (
 	RoleUser        = "user"
 )
 
+var ErrLastAdmin = fmt.Errorf("last admin")
+
 type User struct {
 	ID           string    `json:"id"`
 	Username     string    `json:"username"`
 	DisplayName  string    `json:"display_name"`
 	Role         string    `json:"role"`
+	GroupID      string    `json:"group_id"`
+	GroupName    string    `json:"group_name"`
 	PasswordHash string    `json:"-"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
@@ -35,6 +39,7 @@ type Conversation struct {
 	UserID    string    `json:"user_id"`
 	Username  string    `json:"username,omitempty"`
 	Title     string    `json:"title"`
+	Device    string    `json:"device"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -45,6 +50,7 @@ type Message struct {
 	Role           string    `json:"role"`
 	Body           string    `json:"body"`
 	CreatedAt      time.Time `json:"created_at"`
+	Feedback       *string   `json:"feedback,omitempty"`
 }
 
 type Group struct {
@@ -130,37 +136,91 @@ func Migrate(db *sql.DB, migrationsDir string) error {
 }
 
 func SeedDefaultUser(ctx context.Context, db *sql.DB, passwordHash string) error {
-	_, err := db.ExecContext(ctx, `
-		INSERT INTO users (username, password_hash, display_name, role)
-		VALUES ($1, $2, $3, $4)
+	gid, err := DefaultGroupID(ctx, db)
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO users (username, password_hash, display_name, role, group_id)
+		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT (username) DO UPDATE SET
 			password_hash = EXCLUDED.password_hash,
 			display_name = EXCLUDED.display_name,
 			role = EXCLUDED.role,
+			group_id = EXCLUDED.group_id,
 			updated_at = NOW()
-	`, DefaultUsername, passwordHash, "Armin", RoleAdmin)
-	return err
+	`, DefaultUsername, passwordHash, "Armin", RoleAdmin, gid)
+	if err != nil {
+		return err
+	}
+	u, err := GetUserByUsername(ctx, db, DefaultUsername)
+	if err != nil {
+		return err
+	}
+	return SetUserGroup(ctx, db, u.ID, gid)
+}
+
+func DefaultGroupID(ctx context.Context, db *sql.DB) (string, error) {
+	var id string
+	err := db.QueryRowContext(ctx, `SELECT id FROM groups WHERE name = 'Default' LIMIT 1`).Scan(&id)
+	if err == nil {
+		return id, nil
+	}
+	if err != sql.ErrNoRows {
+		return "", err
+	}
+	err = db.QueryRowContext(ctx, `
+		INSERT INTO groups (name) VALUES ('Default')
+		ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
+		RETURNING id
+	`).Scan(&id)
+	if err != nil {
+		return "", err
+	}
+	_, _ = db.ExecContext(ctx, `
+		INSERT INTO group_rules (group_id, body)
+		VALUES ($1, '')
+		ON CONFLICT (group_id) DO NOTHING
+	`, id)
+	return id, nil
+}
+
+func SetUserGroup(ctx context.Context, db *sql.DB, userID, groupID string) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET group_id = $1, updated_at = NOW() WHERE id = $2`, groupID, userID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM group_members WHERE user_id = $1`, userID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO group_members (group_id, user_id) VALUES ($1, $2)`, groupID, userID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func userSelect() string {
+	return `
+		SELECT u.id, u.username, u.password_hash, u.display_name, u.role, u.group_id, g.name, u.created_at, u.updated_at
+		FROM users u
+		JOIN groups g ON g.id = u.group_id
+	`
 }
 
 func GetUserByUsername(ctx context.Context, db *sql.DB, username string) (*User, error) {
-	return scanUser(db.QueryRowContext(ctx, `
-		SELECT id, username, password_hash, display_name, role, created_at, updated_at
-		FROM users WHERE username = $1
-	`, username))
+	return scanUser(db.QueryRowContext(ctx, userSelect()+` WHERE u.username = $1`, username))
 }
 
 func GetUserByID(ctx context.Context, db *sql.DB, id string) (*User, error) {
-	return scanUser(db.QueryRowContext(ctx, `
-		SELECT id, username, password_hash, display_name, role, created_at, updated_at
-		FROM users WHERE id = $1
-	`, id))
+	return scanUser(db.QueryRowContext(ctx, userSelect()+` WHERE u.id = $1`, id))
 }
 
 func ListUsers(ctx context.Context, db *sql.DB) ([]User, error) {
-	rows, err := db.QueryContext(ctx, `
-		SELECT id, username, password_hash, display_name, role, created_at, updated_at
-		FROM users ORDER BY username
-	`)
+	rows, err := db.QueryContext(ctx, userSelect()+` ORDER BY u.username`)
 	if err != nil {
 		return nil, err
 	}
@@ -213,18 +273,225 @@ func CreateConversation(ctx context.Context, db *sql.DB, userID, title string) (
 	return &conv, nil
 }
 
-func ListConversationsForUser(ctx context.Context, db *sql.DB, userID string) ([]Conversation, error) {
+func ListConversationsForUser(ctx context.Context, db *sql.DB, userID, query string) ([]Conversation, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		rows, err := db.QueryContext(ctx, `
+			SELECT id, user_id, title, created_at, updated_at
+			FROM conversations
+			WHERE user_id = $1
+			ORDER BY updated_at DESC
+		`, userID)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		return scanConversations(rows)
+	}
+	like := "%" + query + "%"
 	rows, err := db.QueryContext(ctx, `
-		SELECT id, user_id, title, created_at, updated_at
-		FROM conversations
-		WHERE user_id = $1
-		ORDER BY updated_at DESC
-	`, userID)
+		SELECT DISTINCT c.id, c.user_id, c.title, c.created_at, c.updated_at
+		FROM conversations c
+		LEFT JOIN messages m ON m.conversation_id = c.id
+		WHERE c.user_id = $1
+			AND (c.title ILIKE $2 OR m.body ILIKE $2)
+		ORDER BY c.updated_at DESC
+	`, userID, like)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	return scanConversations(rows)
+}
+
+func DeleteConversationForUser(ctx context.Context, db *sql.DB, conversationID, userID string) error {
+	res, err := db.ExecContext(ctx, `
+		DELETE FROM conversations WHERE id = $1 AND user_id = $2
+	`, conversationID, userID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+type KnowledgeChunk struct {
+	RelPath string
+	Heading string
+	Body    string
+}
+
+func ReplaceKnowledgeChunks(ctx context.Context, db *sql.DB, chunks []KnowledgeChunk) (int, error) {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM knowledge_chunks`); err != nil {
+		return 0, err
+	}
+	for _, chunk := range chunks {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO knowledge_chunks (rel_path, heading, body)
+			VALUES ($1, $2, $3)
+		`, chunk.RelPath, chunk.Heading, chunk.Body); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return len(chunks), nil
+}
+
+func SearchKnowledgeChunks(ctx context.Context, db *sql.DB, query string, limit int) ([]KnowledgeChunk, error) {
+	query = strings.TrimSpace(query)
+	if query == "" || limit <= 0 {
+		return nil, nil
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT rel_path, heading, body
+		FROM knowledge_chunks
+		WHERE tsv @@ plainto_tsquery('simple', $1)
+			OR heading ILIKE $2
+			OR body ILIKE $2
+		ORDER BY ts_rank(tsv, plainto_tsquery('simple', $1)) DESC
+		LIMIT $3
+	`, query, "%"+query+"%", limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]KnowledgeChunk, 0)
+	for rows.Next() {
+		var chunk KnowledgeChunk
+		if err := rows.Scan(&chunk.RelPath, &chunk.Heading, &chunk.Body); err != nil {
+			return nil, err
+		}
+		out = append(out, chunk)
+	}
+	return out, rows.Err()
+}
+
+func FormatKnowledgeHits(chunks []KnowledgeChunk) string {
+	var b strings.Builder
+	for _, chunk := range chunks {
+		b.WriteString("Source: ")
+		b.WriteString(chunk.RelPath)
+		if strings.TrimSpace(chunk.Heading) != "" {
+			b.WriteString(" — ")
+			b.WriteString(chunk.Heading)
+		}
+		b.WriteString("\n")
+		b.WriteString(chunk.Body)
+		b.WriteString("\n\n")
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func CreateUser(ctx context.Context, db *sql.DB, username, passwordHash, displayName, role string) (*User, error) {
+	username = strings.TrimSpace(username)
+	displayName = strings.TrimSpace(displayName)
+	if role != RoleAdmin {
+		role = RoleUser
+	}
+	gid, err := DefaultGroupID(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	var id string
+	err = db.QueryRowContext(ctx, `
+		INSERT INTO users (username, password_hash, display_name, role, group_id)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING id
+	`, username, passwordHash, displayName, role, gid).Scan(&id)
+	if err != nil {
+		return nil, err
+	}
+	if err := SetUserGroup(ctx, db, id, gid); err != nil {
+		return nil, err
+	}
+	return GetUserByID(ctx, db, id)
+}
+
+func AdminUpdateUser(ctx context.Context, db *sql.DB, id, username, displayName, role, passwordHash string) (*User, error) {
+	username = strings.TrimSpace(username)
+	displayName = strings.TrimSpace(displayName)
+	if role != RoleAdmin {
+		role = RoleUser
+	}
+	current, err := GetUserByID(ctx, db, id)
+	if err != nil {
+		return nil, err
+	}
+	if current.Role == RoleAdmin && role != RoleAdmin {
+		ok, err := hasOtherAdmin(ctx, db, id)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, ErrLastAdmin
+		}
+	}
+	if passwordHash != "" {
+		_, err = db.ExecContext(ctx, `
+			UPDATE users
+			SET username = $2, display_name = $3, role = $4, password_hash = $5, updated_at = NOW()
+			WHERE id = $1
+		`, id, username, displayName, role, passwordHash)
+	} else {
+		_, err = db.ExecContext(ctx, `
+			UPDATE users
+			SET username = $2, display_name = $3, role = $4, updated_at = NOW()
+			WHERE id = $1
+		`, id, username, displayName, role)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return GetUserByID(ctx, db, id)
+}
+
+func DeleteUser(ctx context.Context, db *sql.DB, id string) error {
+	current, err := GetUserByID(ctx, db, id)
+	if err != nil {
+		return err
+	}
+	if current.Role == RoleAdmin {
+		ok, err := hasOtherAdmin(ctx, db, id)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return ErrLastAdmin
+		}
+	}
+	res, err := db.ExecContext(ctx, `DELETE FROM users WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func hasOtherAdmin(ctx context.Context, db *sql.DB, exceptID string) (bool, error) {
+	var n int
+	err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM users WHERE role = $1 AND id <> $2
+	`, RoleAdmin, exceptID).Scan(&n)
+	return n > 0, err
 }
 
 func GetConversation(ctx context.Context, db *sql.DB, id string) (*Conversation, error) {
@@ -281,59 +548,81 @@ func TouchConversationTitle(ctx context.Context, db *sql.DB, id, title string) e
 }
 
 type ChatSettings struct {
-	BaseURL string
-	APIKey  string
-	Model   string
+	BaseURL         string
+	APIKey          string
+	Model           string
+	AllowedFolders  []string
+}
+
+func splitStoredGuidePaths(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return []string{}
+	}
+	parts := strings.Split(raw, "\n")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func joinStoredGuidePaths(paths []string) string {
+	return strings.Join(paths, "\n")
 }
 
 func GetChatSettings(ctx context.Context, db *sql.DB) (*ChatSettings, error) {
 	var s ChatSettings
+	var folderBlob string
 	err := db.QueryRowContext(ctx, `
-		SELECT chat_base_url, chat_api_key, chat_model
+		SELECT chat_base_url, chat_api_key, chat_model,
+			COALESCE(array_to_string(allowed_folders, E'\n'), '')
 		FROM app_settings WHERE id = 1
-	`).Scan(&s.BaseURL, &s.APIKey, &s.Model)
+	`).Scan(&s.BaseURL, &s.APIKey, &s.Model, &folderBlob)
 	if err == sql.ErrNoRows {
-		return &ChatSettings{Model: "auto"}, nil
+		return &ChatSettings{Model: "auto", AllowedFolders: []string{}}, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	s.AllowedFolders = splitStoredGuidePaths(folderBlob)
 	return &s, nil
 }
 
-func PutChatSettings(ctx context.Context, db *sql.DB, baseURL, model, apiKey string, updateKey bool) error {
+func PutChatSettings(ctx context.Context, db *sql.DB, baseURL, model, apiKey string, updateKey bool, allowedFolders []string) error {
+	folderBlob := joinStoredGuidePaths(allowedFolders)
 	if updateKey {
 		_, err := db.ExecContext(ctx, `
-			INSERT INTO app_settings (id, chat_base_url, chat_model, chat_api_key, updated_at)
-			VALUES (1, $1, $2, $3, NOW())
+			INSERT INTO app_settings (id, chat_base_url, chat_model, chat_api_key, allowed_folders, updated_at)
+			VALUES (1, $1, $2, $3, CASE WHEN $4 = '' THEN ARRAY[]::TEXT[] ELSE string_to_array($4, E'\n') END, NOW())
 			ON CONFLICT (id) DO UPDATE SET
 				chat_base_url = EXCLUDED.chat_base_url,
 				chat_model = EXCLUDED.chat_model,
 				chat_api_key = EXCLUDED.chat_api_key,
+				allowed_folders = EXCLUDED.allowed_folders,
 				updated_at = NOW()
-		`, baseURL, model, apiKey)
+		`, baseURL, model, apiKey, folderBlob)
 		return err
 	}
 	_, err := db.ExecContext(ctx, `
-		INSERT INTO app_settings (id, chat_base_url, chat_model, updated_at)
-		VALUES (1, $1, $2, NOW())
+		INSERT INTO app_settings (id, chat_base_url, chat_model, allowed_folders, updated_at)
+		VALUES (1, $1, $2, CASE WHEN $3 = '' THEN ARRAY[]::TEXT[] ELSE string_to_array($3, E'\n') END, NOW())
 		ON CONFLICT (id) DO UPDATE SET
 			chat_base_url = EXCLUDED.chat_base_url,
 			chat_model = EXCLUDED.chat_model,
+			allowed_folders = EXCLUDED.allowed_folders,
 			updated_at = NOW()
-	`, baseURL, model)
+	`, baseURL, model, folderBlob)
 	return err
 }
 
 func APIKeyHint(key string) string {
-	key = strings.TrimSpace(key)
-	if key == "" {
+	if strings.TrimSpace(key) == "" {
 		return ""
 	}
-	if len(key) <= 4 {
-		return "••••"
-	}
-	return "••••" + key[len(key)-4:]
+	return "**********"
 }
 
 func GetGlobalRule(ctx context.Context, db *sql.DB) (string, error) {
@@ -618,7 +907,7 @@ func scanConversations(rows *sql.Rows) ([]Conversation, error) {
 
 func scanUser(row *sql.Row) (*User, error) {
 	var u User
-	err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.DisplayName, &u.Role, &u.CreatedAt, &u.UpdatedAt)
+	err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.DisplayName, &u.Role, &u.GroupID, &u.GroupName, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -627,7 +916,7 @@ func scanUser(row *sql.Row) (*User, error) {
 
 func scanUserRow(rows *sql.Rows) (*User, error) {
 	var u User
-	err := rows.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.DisplayName, &u.Role, &u.CreatedAt, &u.UpdatedAt)
+	err := rows.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.DisplayName, &u.Role, &u.GroupID, &u.GroupName, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
