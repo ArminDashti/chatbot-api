@@ -2,7 +2,7 @@
 # Fill ssh and volume_dir before running server deploy.
 
 stack_name: chatbot-api
-image_tag: chatbot-api:latest
+image_tag: pc-armin/chatbot:api
 compose_file: ../../docker-compose.yml
 dockerfile: ../../dockerfile
 docker_network: chatbot-net

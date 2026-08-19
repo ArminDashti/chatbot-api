@@ -9,6 +9,8 @@ services:
       POSTGRES_DB: chatbot
     expose:
       - "5432"
+    ports:
+      - "5442:5432"
     volumes:
       - chatbot_pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -31,7 +33,7 @@ services:
       CHAT_BASE_URL: ${CHAT_DOCKER_BASE_URL:-http://host.docker.internal:8130/v1}
       CHAT_API_KEY: ${CHAT_API_KEY:-}
       CHAT_MODEL: ${CHAT_MODEL:-auto}
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5184,http://127.0.0.1:5184}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5184,http://127.0.0.1:5184,http://pc-armin}
       KNOWLEDGE_DIR: /knowledge
       GIN_MODE: release
     expose:
@@ -43,6 +45,20 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - chatbot-net
+
+  webui:
+    image: pc-armin/chatbot:webui
+    container_name: chatbot-webui
+    environment:
+      API_HOST: chatbot-api
+      API_PORT: "8134"
+    expose:
+      - "80"
+    depends_on:
+      - api
     restart: unless-stopped
     networks:
       - chatbot-net

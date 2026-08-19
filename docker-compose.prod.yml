@@ -1,4 +1,13 @@
-# Local Docker: Postgres + API (Air) + WebUI (Vite), with bind-mount hot reload.
+# Production-like stack: Postgres + API + WebUI (Nginx).
+# WebUI is the only published service; Nginx proxies /api and /health to the API.
+#
+#   docker network create chatbot-net   # if missing
+#   docker compose -f docker-compose.prod.yml up --build -d
+#
+# Open: http://127.0.0.1:5184
+
+name: chatbot
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -7,8 +16,6 @@ services:
       POSTGRES_USER: chatbot
       POSTGRES_PASSWORD: chatbot
       POSTGRES_DB: chatbot
-    ports:
-      - "5442:5432"
     volumes:
       - chatbot_pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -18,77 +25,66 @@ services:
       retries: 10
     restart: unless-stopped
     networks:
-      - chatbot-net
+      - default
 
   api:
     build:
       context: .
-      dockerfile: dockerfile.dev
-    image: chatbot-api-dev:latest
+      dockerfile: dockerfile
+    image: pc-armin/chatbot:api
     pull_policy: build
     container_name: chatbot-api
-    working_dir: /app
     environment:
       ADDR: ":8134"
       DATABASE_URL: postgres://chatbot:chatbot@postgres:5432/chatbot?sslmode=disable
       JWT_SECRET: ${JWT_SECRET:-dev-jwt-secret-change-me}
-      MIGRATIONS_DIR: migrations
+      MIGRATIONS_DIR: /app/migrations
       CHAT_BASE_URL: ${CHAT_DOCKER_BASE_URL:-http://host.docker.internal:8130/v1}
       CHAT_API_KEY: ${CHAT_API_KEY:-}
       CHAT_MODEL: ${CHAT_MODEL:-auto}
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5184,http://127.0.0.1:5184,http://pc-armin}
+      CORS_ORIGINS: http://127.0.0.1:5184,http://localhost:5184,http://pc-armin
       KNOWLEDGE_DIR: /knowledge
-    ports:
-      - "${PUBLISH_PORT:-8134}:${INTERNAL_PORT:-8134}"
-    volumes:
-      - .:/app
-      - chatbot_gomod:/go/pkg/mod
-      - chatbot_gotmp:/app/tmp
+      GIN_MODE: release
+    expose:
+      - "8134"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8134/health || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8134/health >/dev/null || exit 1"]
       interval: 5s
       timeout: 5s
       retries: 20
-      start_period: 40s
+      start_period: 15s
     restart: unless-stopped
     networks:
-      - chatbot-net
+      - default
 
   webui:
     build:
       context: ../chatbot-webui
-      dockerfile: dockerfile.dev
-    image: chatbot-webui-dev:latest
+      dockerfile: Dockerfile
+    image: pc-armin/chatbot:webui
     pull_policy: build
     container_name: chatbot-webui
-    working_dir: /app
     environment:
-      CHOKIDAR_USEPOLLING: "true"
-      VITE_API_PROXY_TARGET: http://api:8134
+      API_HOST: chatbot-api
+      API_PORT: "8134"
     ports:
-      - "5184:5184"
-    volumes:
-      - ../chatbot-webui:/app
-      - chatbot_webui_node_modules:/app/node_modules
+      - "${PUBLISH_PORT:-5184}:80"
     depends_on:
       api:
         condition: service_healthy
     restart: unless-stopped
     networks:
-      - chatbot-net
+      - default
 
 networks:
-  chatbot-net:
-    name: ${DOCKER_NETWORK:-chatbot-net}
+  default:
+    name: chatbot-net
     external: true
 
 volumes:
   chatbot_pgdata:
-  chatbot_gomod:
-  chatbot_gotmp:
-  chatbot_webui_node_modules:

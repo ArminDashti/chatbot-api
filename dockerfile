@@ -1,3 +1,4 @@
+# Build from repo root: docker build -f dockerfile -t pc-armin/chatbot:api .
 FROM golang:1.22-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -6,7 +7,7 @@ COPY . .
 RUN CGO_ENABLED=0 go build -o /out/server ./cmd/server
 
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates tzdata
+RUN apk add --no-cache ca-certificates tzdata wget
 WORKDIR /app
 COPY --from=build /out/server /app/server
 COPY migrations /app/migrations
