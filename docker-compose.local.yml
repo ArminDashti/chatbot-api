@@ -1,8 +1,9 @@
-# Local Docker: Postgres + API (Air) + WebUI (Vite), with bind-mount hot reload.
+# Local Docker hot-reload: Postgres + Go Air API + Vite WebUI (bind mounts).
+# Usage: docker compose -f docker-compose.local.yml -p chatbot-local up -d --force-recreate
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: chatbot-postgres
+    restart: unless-stopped
     environment:
       POSTGRES_USER: chatbot
       POSTGRES_PASSWORD: chatbot
@@ -16,17 +17,10 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
-    restart: unless-stopped
-    networks:
-      - chatbot-net
 
   api:
-    build:
-      context: .
-      dockerfile: dockerfile.dev
-    image: chatbot-api-dev:latest
-    pull_policy: build
-    container_name: chatbot-api
+    image: golang:1.23-bookworm
+    restart: unless-stopped
     working_dir: /app
     environment:
       ADDR: ":8134"
@@ -36,14 +30,18 @@ services:
       CHAT_BASE_URL: ${CHAT_DOCKER_BASE_URL:-http://host.docker.internal:8130/v1}
       CHAT_API_KEY: ${CHAT_API_KEY:-}
       CHAT_MODEL: ${CHAT_MODEL:-auto}
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5184,http://127.0.0.1:5184,http://pc-armin}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5187,http://127.0.0.1:5187,http://pc-armin}
       KNOWLEDGE_DIR: /knowledge
-    ports:
-      - "${PUBLISH_PORT:-8134}:${INTERNAL_PORT:-8134}"
+    command:
+      - sh
+      - -c
+      - apt-get update && apt-get install -y --no-install-recommends curl git gcc libc6-dev && rm -rf /var/lib/apt/lists/* && go install github.com/air-verse/air@v1.61.7 && air -c .air.toml
     volumes:
       - .:/app
       - chatbot_gomod:/go/pkg/mod
       - chatbot_gotmp:/app/tmp
+    ports:
+      - "8134:8134"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -53,42 +51,43 @@ services:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8134/health || exit 1"]
       interval: 5s
       timeout: 5s
-      retries: 20
-      start_period: 40s
-    restart: unless-stopped
-    networks:
-      - chatbot-net
+      retries: 30
+      start_period: 90s
 
   webui:
-    build:
-      context: ../chatbot-webui
-      dockerfile: dockerfile.dev
-    image: chatbot-webui-dev:latest
-    pull_policy: build
-    container_name: chatbot-webui
+    image: node:22-alpine
+    restart: unless-stopped
     working_dir: /app
     environment:
       CHOKIDAR_USEPOLLING: "true"
+      WATCHPACK_POLLING: "true"
+      VITE_BASE_PATH: "/chatbot/"
+      VITE_HMR_CLIENT_PORT: "80"
       VITE_API_PROXY_TARGET: http://api:8134
-    ports:
-      - "5184:5184"
+    command:
+      - sh
+      - -c
+      - npm install && npm run dev -- --host 0.0.0.0 --port 5173 --strictPort
     volumes:
       - ../chatbot-webui:/app
       - chatbot_webui_node_modules:/app/node_modules
+    ports:
+      - "5187:5173"
+    networks:
+      - default
+      - pc-armin-local
     depends_on:
       api:
         condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - chatbot-net
-
-networks:
-  chatbot-net:
-    name: ${DOCKER_NETWORK:-chatbot-net}
-    external: true
 
 volumes:
   chatbot_pgdata:
+    external: true
+    name: chatbot-api_chatbot_pgdata
   chatbot_gomod:
   chatbot_gotmp:
   chatbot_webui_node_modules:
+
+networks:
+  pc-armin-local:
+    external: true
